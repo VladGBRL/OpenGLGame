@@ -135,10 +135,19 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\stb\stb_image.h" />
+    <ClInclude Include="json.hpp" />
+    <ClInclude Include="stb_image_write.h" />
     <ClInclude Include="tinyexr.h" />
+    <ClInclude Include="tiny_gltf.h" />
+    <ClInclude Include="tiny_obj_loader.h" />
   </ItemGroup>
   <ItemGroup>
+    <Image Include="asphalt.jpg" />
+    <Image Include="bark.jpg" />
+    <Image Include="building.jpg" />
+    <Image Include="fence.jpg" />
     <Image Include="grass.jpg" />
+    <Image Include="roof.jpg" />
   </ItemGroup>
   <ItemGroup>
     <None Include="panorama.hdr" />

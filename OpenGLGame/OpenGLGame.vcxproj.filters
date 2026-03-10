@@ -29,9 +29,36 @@
     <ClInclude Include="tinyexr.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="tiny_obj_loader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="tiny_gltf.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="stb_image_write.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="json.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Image Include="grass.jpg">
+      <Filter>Source Files\Image</Filter>
+    </Image>
+    <Image Include="asphalt.jpg">
+      <Filter>Source Files\Image</Filter>
+    </Image>
+    <Image Include="bark.jpg">
+      <Filter>Source Files\Image</Filter>
+    </Image>
+    <Image Include="fence.jpg">
+      <Filter>Source Files\Image</Filter>
+    </Image>
+    <Image Include="building.jpg">
+      <Filter>Source Files\Image</Filter>
+    </Image>
+    <Image Include="roof.jpg">
       <Filter>Source Files\Image</Filter>
     </Image>
   </ItemGroup>
