@@ -1,11 +1,11 @@
-﻿
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-#include <freeglut.h>
+#include <GL/freeglut.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <vector>
 
 #ifndef M_PI
@@ -80,6 +80,172 @@ static float mouseYSens = 0.015f;
 
 static GLfloat sunPos[4] = { 15.f,28.f,18.f,0.f };
 
+// =============================================================
+//  PLAYER STATE
+//  playerRot is stored in RADIANS internally.
+//  Forward direction: sin(playerRot), cos(playerRot)
+// =============================================================
+float playerX = 0.f;
+float playerZ = RZ;
+// playerRot in radians. Visual rotation = playerRot*180/π degrees then -90° offset.
+// At playerRot=PI/2 the car faces world +X (along the front straight).
+float playerRot = (float)M_PI * 0.5f;
+
+// =============================================================
+//  COLLISION SYSTEM
+// =============================================================
+struct BuildingCollider { float x, z, r; };
+BuildingCollider bldBox[] = {
+    {-22.f, -22.f, 3.5f}, {22.f, -22.f, 3.5f}, {-22.f, 22.f, 4.0f}, {22.f, 22.f, 3.5f},
+    {-22.f, 0.f, 3.0f}, {22.f, 0.f, 3.0f}, {-20.f, -15.f, 3.0f}, {20.f, 15.f, 3.0f}
+};
+
+struct AABB { float x0, z0, x1, z1; };
+static AABB g_aabbs[256];
+static int  g_naabbs = 0;
+
+static void addAABB(float x0, float z0, float x1, float z1) {
+    if (g_naabbs >= 256) return;
+    AABB& a = g_aabbs[g_naabbs++];
+    a.x0 = x0 < x1 ? x0 : x1;
+    a.x1 = x0 < x1 ? x1 : x0;
+    a.z0 = z0 < z1 ? z0 : z1;
+    a.z1 = z0 < z1 ? z1 : z0;
+}
+
+static bool aabbHit(const AABB& a, float px, float pz, float r) {
+    return px > a.x0 - r && px < a.x1 + r &&
+        pz > a.z0 - r && pz < a.z1 + r;
+}
+
+void initColliders() {
+    g_naabbs = 0;
+    addAABB(-FENCE, FENCE - 0.3f, FENCE, FENCE + 0.3f);
+    addAABB(-FENCE, -FENCE - 0.3f, FENCE, -FENCE + 0.3f);
+    addAABB(-FENCE - 0.3f, -FENCE, -FENCE + 0.3f, FENCE);
+    addAABB(FENCE - 0.3f, -FENCE, FENCE + 0.3f, FENCE);
+    addAABB(-5.5f, OUTER_Z + 1.8f, 5.5f, OUTER_Z + 6.3f);
+    addAABB(-5.5f, -(OUTER_Z + 6.3f), 5.5f, -(OUTER_Z + 1.8f));
+    for (int i = -2; i <= 2; i++) {
+        float cx = (float)i * 3.8f;
+        addAABB(cx - 1.8f, -1.5f, cx + 1.8f, 1.5f);
+    }
+    float bHalfD = 0.32f;
+    addAABB(-RX, OUTER_Z + 0.32f - bHalfD, RX, OUTER_Z + 0.32f + bHalfD);
+    addAABB(-RX, INNER_Z - 0.32f - bHalfD, RX, INNER_Z - 0.32f + bHalfD);
+    addAABB(-RX, -OUTER_Z - 0.32f - bHalfD, RX, -OUTER_Z - 0.32f + bHalfD);
+    addAABB(-RX, -INNER_Z + 0.32f - bHalfD, RX, -INNER_Z + 0.32f + bHalfD);
+    addAABB(-13.5f, -0.4f, -12.5f, 0.4f);
+    addAABB(12.5f, -0.4f, 13.5f, 0.4f);
+    addAABB(-25.f, -26.f, -19.f, -18.f);
+    addAABB(19.f, -26.f, 25.f, -18.f);
+    addAABB(-26.f, 18.f, -18.f, 26.f);
+    addAABB(18.f, 18.f, 26.f, 26.f);
+    addAABB(-25.f, -3.f, -18.f, 3.f);
+    addAABB(18.f, -3.f, 25.f, 3.f);
+    addAABB(-22.f, -18.f, -16.f, -12.f);
+    addAABB(16.f, 12.f, 22.f, 18.f);
+}
+
+static bool checkCollisionFull(float px, float pz, float r) {
+    if (fabsf(px) > 30.f || fabsf(pz) > 30.f) return true;
+    for (int i = 0; i < 8; i++) {
+        float dx = px - bldBox[i].x, dz = pz - bldBox[i].z;
+        if (sqrtf(dx * dx + dz * dz) < (r + bldBox[i].r)) return true;
+    }
+    for (int i = 0; i < g_naabbs; i++) {
+        if (aabbHit(g_aabbs[i], px, pz, r)) return true;
+    }
+    return false;
+}
+
+bool checkCollision(float x, float z, float radius) {
+    return checkCollisionFull(x, z, radius);
+}
+
+// Check if a point is on/near the road (for humans to avoid)
+static bool isOnRoad(float px, float pz) {
+    // Front straight: z in [INNER_Z, OUTER_Z], x in [-RX, RX]
+    if (px >= -RX && px <= RX && pz >= INNER_Z && pz <= OUTER_Z) return true;
+    // Back straight: z in [-OUTER_Z, -INNER_Z], x in [-RX, RX]
+    if (px >= -RX && px <= RX && pz >= -OUTER_Z && pz <= -INNER_Z) return true;
+    // Right arc: centre (RX, 0), radius between INNER_Z and OUTER_Z
+    {
+        float dx = px - RX, dz = pz;
+        float d = sqrtf(dx * dx + dz * dz);
+        if (d >= INNER_Z && d <= OUTER_Z) return true;
+    }
+    // Left arc: centre (-RX, 0)
+    {
+        float dx = px + RX, dz = pz;
+        float d = sqrtf(dx * dx + dz * dz);
+        if (d >= INNER_Z && d <= OUTER_Z) return true;
+    }
+    return false;
+}
+
+static bool gKey[256] = {};
+static const float P_SPEED = 0.06f;
+static const float P_TURN = 0.03f;
+static const float P_RAD = 0.9f;
+
+static float normAng(float a) {
+    const float PI = (float)M_PI;
+    while (a > PI) a -= 2 * PI;
+    while (a < -PI) a += 2 * PI;
+    return a;
+}
+
+// =============================================================
+//  CIRCUIT AI CAR
+// =============================================================
+float aiT[1] = { 0.f };
+
+// =============================================================
+//  HUMAN PEDESTRIANS (replace the random wander cars)
+//  They walk outside the road area, avoiding road + buildings.
+// =============================================================
+struct Human {
+    float x, z;       // position
+    float rot;        // facing direction (radians)
+    float tgt;        // target direction
+    float tmr;        // time until next direction change
+    float r, g, b;   // shirt colour
+};
+
+static const int NH = 6;
+static Human humans[NH];
+
+static void spawnHuman(Human& h) {
+    // Pick a random starting position outside the road
+    int tries = 0;
+    do {
+        float angle = ((float)rand() / RAND_MAX) * 2.f * (float)M_PI;
+        float dist = 12.f + ((float)rand() / RAND_MAX) * 5.f;
+        h.x = cosf(angle) * dist;
+        h.z = sinf(angle) * dist;
+        tries++;
+    } while ((isOnRoad(h.x, h.z) || checkCollisionFull(h.x, h.z, 0.4f)) && tries < 200);
+
+    h.rot = ((float)rand() / RAND_MAX) * 2.f * (float)M_PI;
+    h.tgt = h.rot;
+    h.tmr = 1.5f + ((float)rand() / RAND_MAX) * 2.f;
+    // Random shirt colours (avoid grey)
+    float cols[6][3] = {
+        {0.85f,0.15f,0.15f}, {0.15f,0.20f,0.85f}, {0.15f,0.70f,0.20f},
+        {0.85f,0.60f,0.10f}, {0.60f,0.10f,0.70f}, {0.85f,0.85f,0.10f}
+    };
+    int ci = rand() % 6;
+    h.r = cols[ci][0]; h.g = cols[ci][1]; h.b = cols[ci][2];
+}
+
+void initHumans() {
+    for (int i = 0; i < NH; i++) spawnHuman(humans[i]);
+}
+
+// =============================================================
+//  POINT LIGHTS
+// =============================================================
 struct PointLight { float x, y, z; GLenum gl; };
 static const int NL = 5;
 static PointLight lamps[NL];
@@ -107,7 +273,7 @@ void initLighting() {
         lamps[i] = { lpX[i], 9.0f, 0.f, (GLenum)(GL_LIGHT2 + i) };
         GLenum l = lamps[i].gl;
         GLfloat la[] = { 0.10f,0.08f,0.04f,1.f };
-        GLfloat ld[] = { 3.00f,2.80f,2.00f,1.f }; 
+        GLfloat ld[] = { 3.00f,2.80f,2.00f,1.f };
         GLfloat ls[] = { 1.00f,0.95f,0.70f,1.f };
         GLfloat lp[] = { lamps[i].x, lamps[i].y, lamps[i].z, 1.f };
         glEnable(l);
@@ -167,21 +333,16 @@ static void drawShadowCasters() {
     shadowBox(19.5f, 0, 20.f, 5.f, 8.f, 4.f);
     shadowBox(-24.f, 0, -2.f, 4.f, 6.f, 3.f);
     shadowBox(20.f, 0, -1.5f, 4.f, 6.f, 3.f);
-
     shadowBox(-5.5f, 0, OUTER_Z + 1.8f, 11.f, 3.5f, 4.5f);
     shadowBox(-5.5f, 0, -(OUTER_Z + 6.3f), 11.f, 3.5f, 4.5f);
-
     for (int i = -2; i <= 2; i++) shadowBox((float)i * 3.8f - 1.8f, 0, -1.5f, 3.6f, 2.8f, 3.f);
-
     shadowCyl(-(ROAD_W + 1.5f), OUTER_Z + 0.4f, 0.22f, 5.5f);
     shadowCyl(ROAD_W + 1.5f, OUTER_Z + 0.4f, 0.22f, 5.5f);
-
     for (int i = -2; i <= 2; i++) {
         float lx = (float)i * 5.f;
         shadowCyl(lx, OUTER_Z + 1.1f, 0.08f, 4.0f);
         shadowCyl(lx, -OUTER_Z - 1.1f, 0.08f, 4.0f);
     }
-
     int nB = (int)(2.f * RX / 2.0f) + 1;
     for (int i = 0; i < nB; i++) {
         float bx = -RX + (float)i * 2.f - 1.f;
@@ -190,12 +351,11 @@ static void drawShadowCasters() {
         shadowBox(bx, 0, -OUTER_Z - 0.32f, 2.f, 0.65f, 0.32f);
         shadowBox(bx, 0, -INNER_Z + 0.02f, 2.f, 0.65f, 0.32f);
     }
-
     shadowBox(-1.65f, ROAD_Y, -0.44f, 3.3f, 0.9f, 0.88f);
-
     shadowBox(-13.5f, 0, -0.4f, 1.f, 1.5f, 0.8f);
     shadowBox(12.5f, 0, -0.4f, 1.f, 1.5f, 0.8f);
 }
+
 void renderShadows() {
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     glDisable(GL_LIGHTING);
@@ -205,12 +365,10 @@ void renderShadows() {
     glDepthMask(GL_FALSE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
     float Msun[16];
     buildShadowMatrix(Msun, sunPos[0], sunPos[1], sunPos[2], 0.f, 0.01f);
     glColor4f(0.f, 0.f, 0.f, 0.38f);
     glPushMatrix(); glMultMatrixf(Msun); drawShadowCasters(); glPopMatrix();
-
     glColor4f(0.f, 0.f, 0.f, 0.14f);
     for (int li = 0; li < NL; li++) {
         float M[16];
@@ -220,7 +378,6 @@ void renderShadows() {
         shadowBox(-1.65f, ROAD_Y, -0.44f, 3.3f, 0.9f, 0.88f);
         glPopMatrix();
     }
-
     glDepthMask(GL_TRUE);
     glPopAttrib();
 }
@@ -231,6 +388,7 @@ static void solidColor(float r, float g, float b) {
 static void restoreTexLit() {
     glColor3f(1, 1, 1); glEnable(GL_TEXTURE_2D); glEnable(GL_LIGHTING);
 }
+
 static void drawBox(float ox, float oy, float oz,
     float sx, float sy, float sz, float uS = 1.f, float vS = 1.f) {
     float x0 = ox, x1 = ox + sx, y0 = oy, y1 = oy + sy, z0 = oz, z1 = oz + sz;
@@ -242,6 +400,7 @@ static void drawBox(float ox, float oy, float oz,
     glNormal3f(0, 1, 0);  glTexCoord2f(0, 0); glVertex3f(x0, y1, z0); glTexCoord2f(uS, 0); glVertex3f(x1, y1, z0); glTexCoord2f(uS, uS); glVertex3f(x1, y1, z1); glTexCoord2f(0, uS); glVertex3f(x0, y1, z1);
     glEnd();
 }
+
 static void drawCylinder(float cx, float by, float cz, float r, float h, int segs = 12, float uS = 1.f) {
     for (int i = 0; i < segs; i++) {
         float a0 = 2.f * (float)M_PI * i / segs, a1 = 2.f * (float)M_PI * (i + 1) / segs;
@@ -256,6 +415,7 @@ static void drawCylinder(float cx, float by, float cz, float r, float h, int seg
     for (int i = 0; i <= segs; i++) { float a = 2.f * (float)M_PI * i / segs; glTexCoord2f(.5f + .5f * cosf(a), .5f + .5f * sinf(a)); glVertex3f(cx + r * cosf(a), by + h, cz + r * sinf(a)); }
     glEnd();
 }
+
 static void flatQuad(float x0, float z0, float x1, float z1, float x2, float z2, float x3, float z3, float y, float uL, float vL = 1.f) {
     glBegin(GL_QUADS); glNormal3f(0, 1, 0);
     glTexCoord2f(0, 0);   glVertex3f(x0, y, z0); glTexCoord2f(uL, 0);  glVertex3f(x1, y, z1);
@@ -268,13 +428,11 @@ void drawSkybox() {
 
     if (nightMode) {
         glDisable(GL_TEXTURE_2D);
-
         glBegin(GL_QUADS);
         glColor3f(0.01f, 0.02f, 0.06f);
         glVertex3f(-S, S, -S); glVertex3f(S, S, -S);
         glVertex3f(S, S, S);  glVertex3f(-S, S, S);
         glEnd();
-
         float sTop[3] = { 0.01f,0.02f,0.06f };
         float sBot[3] = { 0.04f,0.05f,0.12f };
         float sd[4][4][3] = {
@@ -291,8 +449,6 @@ void drawSkybox() {
             glColor3fv(sTop); glVertex3fv(sd[f][3]);
             glEnd();
         }
-
-        /* stars as GL_POINTS */
         glPointSize(1.5f);
         glColor3f(0.85f, 0.88f, 0.95f);
         static const float stars[][3] = {
@@ -308,13 +464,11 @@ void drawSkybox() {
         for (auto& s : stars) glVertex3f(s[0], s[1], s[2]);
         glEnd();
         glPointSize(1.0f);
-
         glColor3f(0.02f, 0.03f, 0.05f);
         glBegin(GL_QUADS);
         glVertex3f(-S, -S, -S); glVertex3f(S, -S, -S);
         glVertex3f(S, -S, S);  glVertex3f(-S, -S, S);
         glEnd();
-
         glEnable(GL_TEXTURE_2D);
     }
     else {
@@ -344,7 +498,6 @@ void drawSkybox() {
         glTexCoord2f(6, 6); glVertex3f(S, -S, S);   glTexCoord2f(0, 6); glVertex3f(-S, -S, S);
         glEnd();
     }
-
     glEnable(GL_CULL_FACE); glEnable(GL_DEPTH_TEST); glEnable(GL_FOG); glEnable(GL_LIGHTING);
 }
 
@@ -604,23 +757,6 @@ void drawFencePanel(float cx, float cz, float rotY = 0.f) {
     glEnable(GL_CULL_FACE); glPopMatrix();
 }
 
-void drawCar(float cx, float cz, float rotY = 0.f, float cr = 0.82f, float cg = 0.04f, float cb = 0.04f) {
-    glPushMatrix(); glTranslatef(cx, ROAD_Y, cz); glRotatef(rotY, 0, 1, 0);
-    solidColor(cr, cg, cb);
-    drawBox(-1.65f, .06f, -.44f, 3.3f, .10f, .88f); drawBox(-1.20f, .16f, -.43f, 1.4f, .22f, .40f); drawBox(-1.20f, .16f, .03f, 1.4f, .22f, .40f); drawBox(-1.60f, .12f, -.17f, .42f, .11f, .34f);
-    solidColor(cr * 0.18f, cg * 0.18f, cb * 0.18f); drawBox(-.38f, .16f, -.28f, .95f, .36f, .56f);
-    solidColor(cr, cg, cb); drawBox(-.06f, .52f, -.15f, .70f, .26f, .30f);
-    solidColor(.78f, .68f, .08f); drawBox(-.09f, .50f, -.06f, .05f, .34f, .12f); drawBox(-.09f, .82f, -.18f, .46f, .055f, .36f);
-    solidColor(cr, cg, cb);
-    drawBox(-1.65f, .07f, -.55f, .20f, .055f, 1.10f); drawBox(-1.65f, .125f, -.55f, .20f, .045f, 1.10f); drawBox(-1.65f, .07f, -.57f, .20f, .17f, .05f); drawBox(-1.65f, .07f, .52f, .20f, .17f, .05f);
-    drawBox(1.18f, .60f, -.47f, .15f, .065f, .94f); drawBox(1.18f, .665f, -.47f, .15f, .05f, .94f); drawBox(1.18f, .36f, -.49f, .15f, .30f, .055f); drawBox(1.18f, .36f, .43f, .15f, .30f, .055f); drawBox(1.24f, .16f, -.07f, .09f, .46f, .14f);
-    solidColor(0.95f, 0.95f, 0.95f); drawBox(-0.55f, .33f, -.285f, .35f, .22f, .01f);
-    restoreTexLit(); solidColor(.12f, .12f, .12f);
-    struct { float wx, wz; }W[4] = { {-1.22f,-.54f},{-1.22f,.54f},{1.04f,-.54f},{1.04f,.54f} };
-    for (auto& w : W) { glPushMatrix(); glTranslatef(w.wx, .22f, w.wz); glRotatef(90, 1, 0, 0); drawCylinder(0, -.15f, 0, .22f, .30f, 16, 2.f); solidColor(0.65f, 0.65f, 0.68f); drawCylinder(0, -.13f, 0, .13f, .26f, 16, 1.f); glPopMatrix(); }
-    restoreTexLit(); glPopMatrix();
-}
-
 void drawMarshalPost(float cx, float cz, float rotY = 0.f) {
     glPushMatrix(); glTranslatef(cx, 0, cz); glRotatef(rotY, 0, 1, 0);
     glBindTexture(GL_TEXTURE_2D, tex_concrete); drawBox(-0.5f, 0, -0.4f, 1.0f, 1.5f, 0.8f, 1.f, 1.f);
@@ -650,6 +786,162 @@ void drawTyreStack(float cx, float cz) {
     for (int i = 0; i < 4; i++) { glPushMatrix(); glTranslatef(0, (float)i * .22f, 0); glRotatef(90, 1, 0, 0); drawCylinder(0, -.18f, 0, .22f, .18f, 16, 2.f); glPopMatrix(); }
     solidColor(.88f, .78f, 0.f); glPushMatrix(); glTranslatef(0, .26f, 0); glRotatef(90, 1, 0, 0); drawCylinder(0, -.09f, 0, .235f, .04f, 16, 1.f); glPopMatrix();
     restoreTexLit(); glPopMatrix();
+}
+
+// =============================================================
+//  SIMPLIFIED CAR MODEL
+//  - One box body
+//  - 4 cylinder wheels
+//  - Drawn in LOCAL space (model faces +Z = forward)
+//  - Caller does: glTranslate → glRotateY(deg) → drawSimpleCar
+// =============================================================
+static void drawSimpleCarLocal(float cr, float cg, float cb) {
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_CULL_FACE);  // CRITICAL: disable for entire car draw
+
+    // ── MAIN BODY (tall enough to see from above) ─────────
+    // Full car: ~2.0 long (Z), ~0.8 wide (X), ~0.6 tall (Y)
+    glColor3f(cr, cg, cb);
+    // Floor slab
+    drawBox(-0.40f, 0.10f, -1.00f, 0.80f, 0.55f, 2.00f);
+
+    // ── COCKPIT RAISED SECTION (darker, taller, centre) ───
+    glColor3f(cr * 0.60f, cg * 0.60f, cb * 0.60f);
+    drawBox(-0.20f, 0.65f, -0.50f, 0.40f, 0.55f, 0.80f);
+
+    // ── ROLL HOOP ─────────────────────────────────────────
+    glColor3f(0.08f, 0.08f, 0.10f);
+    drawBox(-0.08f, 1.20f, -0.22f, 0.16f, 0.50f, 0.14f);
+
+    // ── NOSE CONE (front, +Z direction) ───────────────────
+    glColor3f(cr * 0.85f, cg * 0.85f, cb * 0.85f);
+    drawBox(-0.14f, 0.10f, 0.90f, 0.28f, 0.25f, 0.30f);
+
+    // ── REAR WING ─────────────────────────────────────────
+    glColor3f(0.08f, 0.08f, 0.10f);
+    // Main blade (wide, clearly visible from top)
+    drawBox(-0.55f, 0.80f, -1.10f, 1.10f, 0.12f, 0.18f);
+    // Endplates
+    drawBox(-0.58f, 0.15f, -1.12f, 0.14f, 0.70f, 0.14f);
+    drawBox(0.44f, 0.15f, -1.12f, 0.14f, 0.70f, 0.14f);
+
+    // ── FRONT WING ────────────────────────────────────────
+    // Main blade (very wide)
+    drawBox(-0.58f, 0.10f, 0.95f, 1.16f, 0.10f, 0.16f);
+    // Endplates
+    drawBox(-0.62f, 0.10f, 0.80f, 0.14f, 0.18f, 0.12f);
+    drawBox(0.48f, 0.10f, 0.80f, 0.14f, 0.18f, 0.12f);
+
+    // ── SIDE PODS ─────────────────────────────────────────
+    glColor3f(cr * 0.80f, cg * 0.80f, cb * 0.80f);
+    drawBox(-0.58f, 0.10f, -0.60f, 0.20f, 0.45f, 1.00f);  // left
+    drawBox(0.38f, 0.10f, -0.60f, 0.20f, 0.45f, 1.00f);  // right
+
+    // ── WHEELS ────────────────────────────────────────────
+    // Rotate 90 degrees around Z so cylinder axis = car's X axis (width)
+    struct WPos { float x, z; } wh[4] = {
+        { -0.62f,  0.55f },   // front-left
+        {  0.62f,  0.55f },   // front-right
+        { -0.62f, -0.70f },   // rear-left
+        {  0.62f, -0.70f },   // rear-right
+    };
+    const float WR = 0.30f;   // wheel radius (tall enough to see)
+    const float WW = 0.28f;   // wheel width
+
+    for (int i = 0; i < 4; i++) {
+        glPushMatrix();
+        glTranslatef(wh[i].x, WR, wh[i].z);
+        glRotatef(90.f, 0.f, 0.f, 1.f);   // cylinder now lies along X axis
+        glTranslatef(0.f, -WW * 0.5f, 0.f);
+
+        glColor3f(0.08f, 0.08f, 0.10f);
+        drawCylinder(0, 0, 0, WR, WW, 18, 2.f);
+
+        glColor3f(0.45f, 0.47f, 0.52f);
+        drawCylinder(0, WW * 0.10f, 0, WR * 0.50f, WW * 0.18f, 12, 1.f);
+
+        glPopMatrix();
+    }
+
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_TEXTURE_2D);
+    glEnable(GL_LIGHTING);
+}
+
+void drawSimpleCar(float cx, float cz, float rotYdeg, float cr, float cg, float cb) {
+    glPushMatrix();
+    glTranslatef(cx, ROAD_Y, cz);
+    glRotatef(rotYdeg, 0.f, 1.f, 0.f);
+    // The local model faces +Z. getCircuitPos/player uses rotY=0 meaning "facing +X",
+    // so we add -90° to align +Z model with +X world at rotY=0.
+    glRotatef(-90.f, 0.f, 1.f, 0.f);
+    drawSimpleCarLocal(cr, cg, cb);
+    glPopMatrix();
+}
+
+// =============================================================
+//  SIMPLE HUMAN MODEL
+//  - Box body (shirt colour)
+//  - Box legs
+//  - Sphere head
+// =============================================================
+void drawHuman(float cx, float cz, float rotYdeg, float cr, float cg, float cb) {
+    glPushMatrix();
+    glTranslatef(cx, 0.f, cz);
+    glRotatef(rotYdeg, 0.f, 1.f, 0.f);
+    glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING);
+
+    // Legs (dark trousers)
+    glColor3f(0.15f, 0.15f, 0.30f);
+    drawBox(-0.12f, 0.00f, -0.09f, 0.10f, 0.45f, 0.18f); // left leg
+    drawBox(0.02f, 0.00f, -0.09f, 0.10f, 0.45f, 0.18f); // right leg
+
+    // Body / torso (shirt colour)
+    glColor3f(cr, cg, cb);
+    drawBox(-0.15f, 0.45f, -0.10f, 0.30f, 0.38f, 0.20f);
+
+    // Head (skin tone)
+    glColor3f(0.88f, 0.72f, 0.56f);
+    glPushMatrix();
+    glTranslatef(0.f, 0.97f, 0.f);
+    GLUquadric* q = gluNewQuadric();
+    gluSphere(q, 0.13f, 8, 6);
+    gluDeleteQuadric(q);
+    glPopMatrix();
+
+    glEnable(GL_TEXTURE_2D); glEnable(GL_LIGHTING);
+    glPopMatrix();
+}
+
+// =============================================================
+//  CIRCUIT PATH – unchanged
+// =============================================================
+void getCircuitPos(float t, float& x, float& z, float& rotY) {
+    float straightLen = 2.f * RX;
+    float arcLen = (float)M_PI * RZ;
+    float total = 2.f * straightLen + 2.f * arcLen;
+    float d = fmodf(t * total + total, total);
+    if (d < straightLen) {
+        float f = d / straightLen;
+        x = -RX + f * 2.f * RX; z = RZ; rotY = 0.f;
+    }
+    else if (d < straightLen + arcLen) {
+        float f = (d - straightLen) / arcLen;
+        float a = (90.f - f * 180.f) * (float)M_PI / 180.f;
+        x = RX + RZ * cosf(a); z = RZ * sinf(a);
+        rotY = 90.f - (90.f - f * 180.f);
+    }
+    else if (d < 2.f * straightLen + arcLen) {
+        float f = (d - straightLen - arcLen) / straightLen;
+        x = RX - f * 2.f * RX; z = -RZ; rotY = 180.f;
+    }
+    else {
+        float f = (d - 2.f * straightLen - arcLen) / arcLen;
+        float a = (-90.f - f * 180.f) * (float)M_PI / 180.f;
+        x = -RX + RZ * cosf(a); z = RZ * sinf(a);
+        rotY = 90.f - (-90.f - f * 180.f);
+    }
 }
 
 void drawStaticObjects() {
@@ -689,7 +981,25 @@ void drawStaticObjects() {
     for (int i = 0; i < fN; i++) { float t = -FENCE + fS * i + fS * .5f; drawFencePanel(t, -FENCE, 0.f); drawFencePanel(t, FENCE, 180.f); drawFencePanel(-FENCE, t, 90.f); drawFencePanel(FENCE, t, 270.f); }
     for (int i = 0; i < 6; i++) { float a = (float)M_PI * (-50.f + (float)i * 20.f) / 180.f, tr = INNER_Z - 0.7f; drawTyreStack(RX + tr * cosf(a), tr * sinf(a)); drawTyreStack(-RX + tr * cosf(a), tr * sinf(a)); }
     for (int i = -4; i <= 4; i++) drawCone((float)i * .75f, 1.5f);
-    drawCar(0.0f, RZ, 90.f, 0.82f, 0.04f, 0.04f);
+
+    // ---- PLAYER CAR (green) ----
+    // playerRot is in radians; forward = sin(playerRot), cos(playerRot)
+    // glRotatef expects degrees; we rotate by playerRot converted to degrees.
+    drawSimpleCar(playerX, playerZ, playerRot * 180.f / (float)M_PI, 0.10f, 0.85f, 0.10f);
+
+    // ---- CIRCUIT AI CAR (blue) ----
+    {
+        float ax, az, arot;
+        getCircuitPos(aiT[0], ax, az, arot);
+        drawSimpleCar(ax, az, arot, 0.10f, 0.10f, 0.85f);
+    }
+
+    // ---- HUMAN PEDESTRIANS ----
+    for (int i = 0; i < NH; i++) {
+        drawHuman(humans[i].x, humans[i].z,
+            humans[i].rot * 180.f / (float)M_PI,
+            humans[i].r, humans[i].g, humans[i].b);
+    }
 }
 
 void getLookDir(float& dx, float& dy, float& dz) {
@@ -719,10 +1029,8 @@ static void applyDayNight() {
         glFogfv(GL_FOG_COLOR, fc); glFogf(GL_FOG_DENSITY, 0.013f);
     }
     else {
-     
         glClearColor(0.02f, 0.03f, 0.08f, 1.f);
-
-        GLfloat overPos[] = { 0.f,1.f,0.f,0.f }; 
+        GLfloat overPos[] = { 0.f,1.f,0.f,0.f };
         GLfloat overAmb[] = { 0.05f,0.06f,0.10f,1.f };
         GLfloat overDif[] = { 0.22f,0.20f,0.15f,1.f };
         GLfloat overSpc[] = { 0.f,0.f,0.f,1.f };
@@ -733,16 +1041,13 @@ static void applyDayNight() {
         glEnable(GL_LIGHT0);
         glDisable(GL_LIGHT1);
         for (int i = 0; i < NL; i++) glDisable(lamps[i].gl);
-
         GLfloat ga[] = { 0.38f,0.30f,0.12f,1.f };
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT, ga);
         glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE);
-
         GLfloat fc[] = { 0.02f,0.03f,0.08f,1.f };
         glFogfv(GL_FOG_COLOR, fc); glFogf(GL_FOG_DENSITY, 0.015f);
     }
 }
-
 
 static void drawLampGlow(float cx, float cz) {
     const int S = 24;
@@ -765,6 +1070,7 @@ static void drawLampGlow(float cx, float cz) {
     }
     glEnd();
 }
+
 static void drawNightGlow() {
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     glDisable(GL_LIGHTING); glDisable(GL_TEXTURE_2D);
@@ -779,6 +1085,7 @@ static void drawNightGlow() {
     glDepthMask(GL_TRUE);
     glPopAttrib();
 }
+
 void display() {
     applyDayNight();
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -827,6 +1134,7 @@ void reshape(int w, int h) {
 }
 
 void keyboard(unsigned char key, int, int) {
+    gKey[key] = true;
     float dx, dy, dz; getLookDir(dx, dy, dz); float rx = dz, rz = -dx;
     switch (key) {
     case'w':case'W':camX += dx * speed; camZ += dz * speed; break;
@@ -846,6 +1154,7 @@ void keyboard(unsigned char key, int, int) {
     if (camY < .4f)camY = .4f; if (camY > 30.f)camY = 30.f;
     glutPostRedisplay();
 }
+void keyUp(unsigned char key, int, int) { gKey[key] = false; }
 
 void specialKeys(int key, int, int) {
     switch (key) {
@@ -869,21 +1178,110 @@ void mouseMotion(int x, int y) {
     if (mouseRight) { camY -= (float)dy * mouseYSens; if (camY < .4f)camY = .4f; if (camY > 30.f)camY = 30.f; glutPostRedisplay(); }
 }
 
+// =============================================================
+//  IDLE
+//
+//  Player car movement:
+//    J/L → rotate (change playerRot)
+//    I/K → move forward/backward along local forward axis
+//         local forward = (sin(playerRot), cos(playerRot))
+//    Collision: axis-separated slide (no jitter).
+// =============================================================
+void idle() {
+    const float DT = 0.016f;
+
+    // ---- PLAYER: turn ----
+    if (gKey['j'] || gKey['J']) playerRot += P_TURN;
+    if (gKey['l'] || gKey['L']) playerRot -= P_TURN;
+
+    float fwdX = -cosf(playerRot);
+    float fwdZ = sinf(playerRot);
+
+    // ---- PLAYER: forward/backward ----
+    float sign = 0.f;
+    if (gKey['i'] || gKey['I']) sign = 1.f;
+    if (gKey['k'] || gKey['K']) sign = -1.f;
+
+    if (sign != 0.f) {
+        float mdx = fwdX * P_SPEED * sign;
+        float mdz = fwdZ * P_SPEED * sign;
+        float nx = playerX + mdx;
+        float nz = playerZ + mdz;
+
+        if (!checkCollisionFull(nx, nz, P_RAD)) {
+            playerX = nx; playerZ = nz;
+        }
+        else if (!checkCollisionFull(playerX + mdx, playerZ, P_RAD)) {
+            playerX += mdx;
+        }
+        else if (!checkCollisionFull(playerX, playerZ + mdz, P_RAD)) {
+            playerZ += mdz;
+        }
+        // else fully blocked – stay put, no jitter
+    }
+
+    // ---- CIRCUIT AI CAR ----
+    aiT[0] += 0.0018f;
+    if (aiT[0] >= 1.f) aiT[0] -= 1.f;
+
+    // ---- HUMAN PEDESTRIANS ----
+    const float H_SPEED = 0.018f;   // slow walking speed
+    const float H_RAD = 0.35f;    // human collision radius
+    const float MAX_TURN_H = 0.04f;  // max turn per frame
+
+    for (int i = 0; i < NH; i++) {
+        Human& h = humans[i];
+
+        // Smoothly steer toward target direction
+        float diff = normAng(h.tgt - h.rot);
+        float turn = diff > MAX_TURN_H ? MAX_TURN_H : diff < -MAX_TURN_H ? -MAX_TURN_H : diff;
+        h.rot += turn;
+
+        float hfx = sinf(h.rot);
+        float hfz = cosf(h.rot);
+        float nx = h.x + hfx * H_SPEED;
+        float nz = h.z + hfz * H_SPEED;
+
+        // Block movement onto road or into colliders
+        bool blocked = checkCollisionFull(nx, nz, H_RAD) || isOnRoad(nx, nz);
+        if (!blocked) {
+            h.x = nx; h.z = nz;
+        }
+        else {
+            // Turn away: pick opposite direction with some randomness
+            h.tgt = h.rot + (float)M_PI + ((float)rand() / RAND_MAX - 0.5f) * (float)M_PI;
+        }
+
+        // Periodic random direction change
+        h.tmr -= DT;
+        if (h.tmr <= 0.f) {
+            h.tgt = ((float)rand() / RAND_MAX) * 2.f * (float)M_PI;
+            h.tmr = 2.0f + ((float)rand() / RAND_MAX) * 3.f;
+        }
+    }
+
+    glutPostRedisplay();
+}
+
 int main(int argc, char** argv) {
+    srand((unsigned)time(NULL));
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(WIDTH, HEIGHT);
-    glutCreateWindow("F1 Street Circuit – P3: Camera/Lighting/Shadows");
+    glutCreateWindow("F1 Street Circuit – P3+C1+C2");
     glClearColor(.70f, .78f, .88f, 1.f);
     glEnable(GL_DEPTH_TEST); glEnable(GL_NORMALIZE);
     initTextures(); initLighting(); initFog();
+    initColliders();
+    initHumans();
     glutDisplayFunc(display); glutReshapeFunc(reshape);
-    glutKeyboardFunc(keyboard); glutSpecialFunc(specialKeys);
+    glutKeyboardFunc(keyboard); glutKeyboardUpFunc(keyUp); glutSpecialFunc(specialKeys);
     glutMouseFunc(mouseButton); glutMotionFunc(mouseMotion);
-    printf("\nControls: WASD=move  Space/C=up/down  Arrows=look\n");
+    glutIdleFunc(idle);
+    printf("\nControls: WASD=camera  Space/C=up/down  Arrows=look\n");
+    printf("I/K=drive forward/back   J/L=turn left/right\n");
     printf("Left-drag=mouselook  Right-drag=vert-pan  +/-=speed  ESC=exit\n");
-    printf("N = toggle Night / Day mode\n");
-    printf("Lights: LIGHT0=sun  LIGHT1=fill  LIGHT2-4=front straight  LIGHT5-6=back straight\n\n");
+    printf("N = toggle Night / Day mode\n\n");
     glutMainLoop();
     return 0;
 }

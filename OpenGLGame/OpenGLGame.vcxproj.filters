@@ -66,5 +66,6 @@
     <None Include="panorama.hdr">
       <Filter>Source Files\Image</Filter>
     </None>
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>
